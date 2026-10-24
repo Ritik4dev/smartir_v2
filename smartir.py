@@ -17,6 +17,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 CORE = ROOT / "smartir_v2.py"
+PC_CORE = ROOT / "pc_webcam" / "smartir_pc.py"
 DEPENDENCIES = ROOT / "dependencies.txt"
 CHECK_IMPORTS = "import cv2, numpy, picamera2, tkinter, evdev"
 
@@ -57,6 +58,14 @@ def missing_imports(python: str) -> str | None:
     return None if result.returncode == 0 else (result.stderr.strip() or "Import check failed")
 
 
+def missing_pc_imports(python: str) -> str | None:
+    result = subprocess.run(
+        [python, "-c", "import cv2, numpy, tkinter"],
+        capture_output=True, text=True, check=False,
+    )
+    return None if result.returncode == 0 else (result.stderr.strip() or "Import check failed")
+
+
 def ensure_dependencies(python: str) -> None:
     if not on_raspberry_pi():
         return
@@ -88,29 +97,45 @@ def ensure_dependencies(python: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if not CORE.is_file():
-        print(f"SMARTIR error: missing {CORE}", file=sys.stderr)
+    target = PC_CORE if platform.system() == "Windows" else CORE
+    if not target.is_file():
+        print(f"SMARTIR error: missing {target}", file=sys.stderr)
         return 1
     if arguments and arguments[0] in ("-h", "--help"):
-        print("Usage: python smartir.py [doctor|snapshot|probe|calibrate|run|gui] [options]")
-        print("With no command: open the GUI on a Pi desktop, or run diagnostics on Lite.")
+        if platform.system() == "Windows":
+            print("Usage: python smartir.py [gui|doctor|preview|calibrate|run] [options]")
+        else:
+            print("Usage: python smartir.py [doctor|snapshot|probe|calibrate|run|gui] [options]")
+        print("With no command: open the GUI on Windows/Pi desktop, or run diagnostics on Lite.")
         print("For full options after setup: python smartir.py gui --help")
         return 0
     python = os_python()
+    if platform.system() == "Windows":
+        # The PC app has its own optional packages and calibration profile.
+        # Never try to apt-install Raspberry Pi dependencies on a laptop.
+        problem = missing_pc_imports(python)
+        if problem is not None:
+            print("SMARTIR PC dependencies are missing. From pc_webcam run: "
+                  "python -m pip install -r requirements.txt", file=sys.stderr)
+            print(problem, file=sys.stderr)
+            return 1
+        if not arguments:
+            arguments = ["gui"]
+    else:
+        try:
+            ensure_dependencies(python)
+        except (RuntimeError, OSError, subprocess.CalledProcessError) as exc:
+            print(f"SMARTIR setup error: {exc}", file=sys.stderr)
+            return 1
+        if not arguments:
+            arguments = ["gui"] if (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) else ["doctor", "--camera-test"]
+        if arguments[0] == "gui" and platform.system() == "Linux" and os.geteuid() == 0:
+            print("SMARTIR error: launch the GUI as your signed-in desktop user, not root. "
+                  "Type 'exit' to leave the root shell, then run 'python3 smartir.py'.",
+                  file=sys.stderr)
+            return 1
     try:
-        ensure_dependencies(python)
-    except (RuntimeError, OSError, subprocess.CalledProcessError) as exc:
-        print(f"SMARTIR setup error: {exc}", file=sys.stderr)
-        return 1
-    if not arguments:
-        arguments = ["gui"] if (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) else ["doctor", "--camera-test"]
-    if arguments[0] == "gui" and platform.system() == "Linux" and os.geteuid() == 0:
-        print("SMARTIR error: launch the GUI as your signed-in desktop user, not root. "
-              "Type 'exit' to leave the root shell, then run 'python3 smartir.py'.",
-              file=sys.stderr)
-        return 1
-    try:
-        return subprocess.run([python, str(CORE), *arguments], check=False).returncode
+        return subprocess.run([python, str(target), *arguments], check=False).returncode
     except KeyboardInterrupt:
         return 130
 

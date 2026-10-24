@@ -44,6 +44,14 @@ class LauncherTests(unittest.TestCase):
                 smartir.ensure_dependencies("/usr/bin/python3")
             run.assert_not_called()
 
+    def test_windows_routes_to_pc_webcam_app(self):
+        with patch.object(smartir.platform, "system", return_value="Windows"), \
+             patch.object(smartir, "missing_pc_imports", return_value=None), \
+             patch.object(smartir.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(smartir.main([]), 0)
+            self.assertEqual(run.call_args.args[0][-2:], [str(smartir.PC_CORE), "gui"])
+
 
 if __name__ == "__main__":
     unittest.main()

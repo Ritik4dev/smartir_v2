@@ -6,6 +6,11 @@ On a Raspberry Pi OS desktop, run from this folder:
 python smartir.py
 ```
 
+On a Windows laptop, the **same launcher** opens the separate PC webcam
+version in `pc_webcam/`. Install its packages once with
+`python -m pip install -r pc_webcam/requirements.txt`; its instructions and
+separate calibration are in [pc_webcam/README.md](pc_webcam/README.md).
+
 If `python` is not available, use `python3 smartir.py` instead. On first run,
 the launcher checks the OS Python for Picamera2, OpenCV, NumPy, Tk, and evdev.
 If packages are missing, it asks before running `sudo apt-get update` and
