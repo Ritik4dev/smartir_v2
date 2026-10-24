@@ -1,6 +1,8 @@
 """Hardware-free tests for the PC webcam application."""
 
 import unittest
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,7 +11,7 @@ import numpy as np
 
 from smartir_pc import (CalibrationHold, WindowsMouse, annotated_camera,
                         calibration_screen, camera_controls, camera_inset,
-                        gray_bgr, main, open_camera, open_ip_stream,
+                        gray_bgr, learn, load_led_profile, main, open_camera, open_ip_stream,
                         validate_stream_url)
 
 
@@ -28,6 +30,63 @@ class FakeUser32:
 
 
 class PcTests(unittest.TestCase):
+    def test_teach_workflow_collects_confirmed_frames(self):
+        off = np.full((90, 130, 3), 20, np.uint8)
+        on = off.copy()
+        cv2.circle(on, (50, 40), 2, (170, 20, 170), -1)
+        args = SimpleNamespace(led_profile=Path("unused-profile.json"),
+                               stream_url="", camera=0, width=130,
+                               height=90, fps=30, exposure=None, gain=None,
+                               min_delta=18, max_area=250)
+        cap = unittest.mock.MagicMock()
+        reads = [0]
+        callback = [None]
+        keys = [0]
+
+        def next_frame(_cap):
+            reads[0] += 1
+            return off if reads[0] <= 17 else on
+
+        def set_callback(_name, handler):
+            callback[0] = handler
+
+        def next_key(_delay):
+            keys[0] += 1
+            if keys[0] == 1:
+                return 32
+            if keys[0] == 18:
+                callback[0](cv2.EVENT_LBUTTONDOWN, 50, 40, 0, None)
+            return 13 if keys[0] == 80 else 0
+
+        with patch("smartir_pc.open_camera", return_value=(cap, off, 700)), \
+             patch("smartir_pc.read_frame", side_effect=next_frame), \
+             patch("smartir_pc.view"), \
+             patch("smartir_pc.cv2.resizeWindow"), \
+             patch("smartir_pc.cv2.setMouseCallback", side_effect=set_callback), \
+             patch("smartir_pc.cv2.imshow"), \
+             patch("smartir_pc.cv2.waitKey", side_effect=next_key), \
+             patch("smartir_pc.cv2.destroyAllWindows"), \
+             patch("smartir_pc.save_calibration") as saved:
+            self.assertTrue(learn(args))
+        profile = saved.call_args.args[0]
+        self.assertGreaterEqual(profile["sample_count"], 8)
+        self.assertEqual(profile["camera_size"], [130, 90])
+        cap.release.assert_called_once()
+
+    def test_learned_profile_is_bound_to_camera(self):
+        args = SimpleNamespace(led_profile=Path("sample-led.json"),
+                               stream_url="", camera=0, width=640,
+                               height=480, fps=30, exposure=None, gain=None)
+        profile = {"version": 1, "camera_size": [640, 480],
+                   "camera_controls": camera_controls(args),
+                   "bgr_chroma": [.4, .2, .4],
+                   "chroma_tolerance": .3, "color_reliable": True}
+        with patch("smartir_pc.Path.read_text", return_value=json.dumps(profile)):
+            self.assertTrue(load_led_profile(args, (640, 480))["color_reliable"])
+            args.camera = 1
+            with self.assertRaisesRegex(RuntimeError, "Camera source"):
+                load_led_profile(args, (640, 480))
+
     def test_calibration_opens_canvas_after_success(self):
         with patch("smartir_pc.calibrate") as calibrate, patch("smartir_pc.run") as run:
             self.assertEqual(main(["calibrate"]), 0)

@@ -19,8 +19,9 @@ py smartir_pc.py
 ```
 
 Or if `python` is your working command, replace `py` with `python`.
-The GUI buttons guide you through preview, calibration, canvas test, and
-optional desktop mouse control. Start with camera preview. If the external
+The GUI buttons guide you through LED teaching, preview, calibration, canvas
+test, and optional desktop mouse control. Start with **Teach IR remote**.
+If the external
 USB webcam is index 1, change the index in the GUI or use `--camera 1`.
 To use an IP camera, paste its **video stream URL** into the optional GUI field.
 That overrides the webcam index. A typical phone IP-camera app might expose
@@ -34,6 +35,7 @@ CLI equivalents:
 
 ```powershell
 py smartir_pc.py doctor --camera 0
+py smartir_pc.py learn --camera 0
 py smartir_pc.py preview --camera 0
 py smartir_pc.py calibrate --camera 0
 py smartir_pc.py run --camera 0 --output canvas
@@ -55,6 +57,17 @@ its own screen plane; place an external USB webcam facing the display. During
 calibration, place the remote's emitting LED at each crosshair and aim it
 toward that webcam. Four corner targets are mandatory; five more improve and
 validate the mapping. Release the remote before each new target appears.
+Before preview or calibration, teach the remote: keep its button **released**
+and press **Space** to collect 16 background frames. Then hold the button,
+click the actual LED in the live camera image, and keep it still while 60
+frames are examined. Review the green marked location and press **Enter** to
+save, or **R** to retry. Successful teaching opens the preview so you can
+verify tracking before calibrating. The application saves only a compact
+`pc-led-profile.json` with the learned color clue and camera identity; the
+full camera frames are processed in memory and are not saved or pushed.
+Training needs repeated matching flashes; a single random highlight cannot
+pass. A camera that renders IR nearly white may provide no useful color clue,
+so the software falls back to shape, change, and repeated-frame tracking.
 The calibration screen now includes a live camera view. A green circle marks
 the detected light in that view; the ring around the target fills as the
 camera repeatedly sees a stable spot. Wait for **POINT CALIBRATED** before

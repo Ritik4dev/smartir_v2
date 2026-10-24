@@ -8,7 +8,7 @@ import numpy as np
 
 
 def find_pc_spot(frame_gray, background, min_delta=18, max_area=250,
-                 preferred=None, max_jump=None):
+                 preferred=None, max_jump=None, frame_bgr=None, signature=None):
     """Return (camera point, candidate mask, status) for a pulsed LED.
 
     A temporal difference rejects fixed lamps; local contrast rejects broad
@@ -19,6 +19,9 @@ def find_pc_spot(frame_gray, background, min_delta=18, max_area=250,
         raise ValueError("Camera frame and background must be matching grayscale images")
     if frame_gray.dtype != np.uint8 or background.dtype != np.uint8:
         raise ValueError("Camera frame and background must be uint8")
+    if signature is not None and (frame_bgr is None or
+                                  frame_bgr.shape[:2] != frame_gray.shape):
+        raise ValueError("A learned light signature requires the matching color frame")
     if max_jump is None:
         max_jump = max(25, min(frame_gray.shape) * .25)
     change = cv2.subtract(frame_gray, background)
@@ -49,9 +52,16 @@ def find_pc_spot(frame_gray, background, min_delta=18, max_area=250,
         temporal_peak = int(change[y:y+h, x:x+w][region].max())
         local_peak = int(local[y:y+h, x:x+w][region].max())
         score = temporal_peak + .5 * local_peak + 2 * min(area, 12) + 20 * roundness
+        if signature is not None and signature.get("color_reliable"):
+            peak_y, peak_x = np.unravel_index(
+                np.argmax(np.where(region, change[y:y+h, x:x+w], 0)), region.shape)
+            pixel = frame_bgr[y+peak_y, x+peak_x].astype(np.float32)
+            chroma = pixel / max(1.0, float(pixel.sum()))
+            if np.abs(chroma - np.asarray(signature["bgr_chroma"])).sum() > signature["chroma_tolerance"]:
+                continue
         candidates.append((score, tuple(float(v) for v in centroids[label])))
     if not candidates:
-        return None, mask, "no small changing light"
+        return None, mask, "no matching compact light"
     candidates.sort(key=lambda candidate: candidate[0], reverse=True)
     if preferred is not None:
         nearby = [(score, point, float(np.linalg.norm(np.subtract(point, preferred))))

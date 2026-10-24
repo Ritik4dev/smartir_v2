@@ -5,4 +5,6 @@ smartir-calibration.json.tmp
 smartir-snapshot.png
 pc_webcam/pc-calibration.json
 pc_webcam/pc-calibration.json.tmp
+pc_webcam/pc-led-profile.json
+pc_webcam/pc-led-profile.json.tmp
 pc_webcam/.venv/

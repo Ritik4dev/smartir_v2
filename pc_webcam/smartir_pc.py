@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hashlib
+import json
 import os
 from pathlib import Path
 import platform
@@ -18,6 +19,7 @@ import cv2
 import numpy as np
 
 from detector import find_pc_spot as find_spot
+from learning import CameraLock, LightLearning
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
@@ -26,6 +28,7 @@ from smartir_v2 import (PulseTracker, fit_calibration,
                         target_positions)
 
 DEFAULT_CAL = HERE / "pc-calibration.json"
+DEFAULT_LED = HERE / "pc-led-profile.json"
 
 
 def gray_bgr(frame):
@@ -185,6 +188,25 @@ def camera_controls(args):
             "exposure": args.exposure, "gain": args.gain}
 
 
+def load_led_profile(args, capture_size):
+    try:
+        profile = json.loads(Path(args.led_profile).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Teach the remote LED first using 'Teach IR remote'") from exc
+    if (profile.get("version") != 1 or
+            profile.get("camera_size") != list(capture_size) or
+            profile.get("camera_controls") != camera_controls(args)):
+        raise RuntimeError("Camera source or resolution changed; teach the remote LED again")
+    chroma = np.asarray(profile.get("bgr_chroma"), dtype=float)
+    tolerance = profile.get("chroma_tolerance")
+    if (chroma.shape != (3,) or not np.isfinite(chroma).all() or
+            np.min(chroma) < 0 or abs(float(chroma.sum()) - 1) > .05 or
+            not isinstance(tolerance, (int, float)) or not 0 < tolerance <= 2 or
+            not isinstance(profile.get("color_reliable"), bool)):
+        raise RuntimeError("LED training profile is invalid; teach the remote again")
+    return profile
+
+
 def view(name, fullscreen=False):
     cv2.namedWindow(name, cv2.WINDOW_NORMAL)
     if fullscreen:
@@ -296,27 +318,127 @@ def doctor(args):
         cap.release()
 
 
+def learn(args):
+    """Capture LED-off background, then user-confirmed LED-on frame samples."""
+    cap, frame, _ = open_camera(args)
+    capture_size = (frame.shape[1], frame.shape[0])
+    name = "SMARTIR - teach remote LED"
+    clicked = {"point": None}
+
+    def choose_light(event, x, y, _flags, _param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            clicked["point"] = (x, y)
+
+    try:
+        view(name)
+        cv2.resizeWindow(name, *capture_size)
+        cv2.setMouseCallback(name, choose_light)
+        background = None
+        learner = None
+        phase = "off"
+        frames_left = 0
+        off_frames = []
+        learned = None
+        failure = ""
+        while True:
+            frame = read_frame(cap)
+            visual = frame.copy()
+            spot = None
+            if phase == "off":
+                draw_label(visual, "1. Release remote button. Press SPACE to sample LED-OFF frames")
+            elif phase == "background":
+                off_frames.append(gray_bgr(frame).copy())
+                frames_left -= 1
+                draw_label(visual, f"Sampling LED-OFF background: {len(off_frames)}/16")
+                if frames_left <= 0:
+                    background = np.median(off_frames, axis=0).astype(np.uint8)
+                    phase = "select"
+            elif phase == "select":
+                spot, _, reason = find_spot(gray_bgr(frame), background,
+                                             min_delta=args.min_delta,
+                                             max_area=args.max_area)
+                visual = annotated_camera(frame, spot, reason)
+                draw_label(visual, "2. Hold remote ON and click its light in this camera view", 65)
+                draw_label(visual, "Keep it still while 60 frames are collected. R retries; Q quits", 96)
+                if clicked["point"] is not None:
+                    learner = LightLearning(background, clicked["point"],
+                                            args.min_delta, args.max_area)
+                    frames_left = 60
+                    phase = "capture"
+            elif phase == "capture":
+                spot = learner.observe(frame)
+                frames_left -= 1
+                cv2.circle(visual, tuple(round(v) for v in learner.selected),
+                           22, (0, 190, 255), 2, cv2.LINE_AA)
+                if spot is not None:
+                    cv2.circle(visual, tuple(round(v) for v in spot),
+                               12, (0, 255, 0), 2, cv2.LINE_AA)
+                draw_label(visual, f"Collecting LED-ON frames: {60-frames_left}/60; "
+                           f"matching flashes: {len(learner.hits)}")
+                if frames_left <= 0:
+                    try:
+                        learned = learner.finish()
+                    except ValueError as exc:
+                        failure = str(exc)
+                        phase = "failed"
+                    else:
+                        phase = "confirm"
+            elif phase == "confirm":
+                cv2.circle(visual, tuple(round(v) for v in learner.selected),
+                           22, (0, 255, 0), 2, cv2.LINE_AA)
+                draw_label(visual, f"Learned from {learned['sample_count']} flashes. "
+                           "ENTER saves; R retries; Q quits")
+                draw_label(visual, "Color clue available" if learned["color_reliable"]
+                           else "Color not distinctive: using shape + temporal tracking", 65)
+            else:
+                draw_label(visual, "Learning failed: " + failure[:55])
+                draw_label(visual, "Press R to repeat with LED off, then hold it on and click", 65)
+            cv2.imshow(name, visual)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (27, ord("q")):
+                return False
+            if key == ord("r"):
+                clicked["point"] = None
+                off_frames = []
+                phase = "off"
+            elif phase == "off" and key == 32:
+                phase = "background"
+                frames_left = 16
+            elif phase == "confirm" and key in (10, 13):
+                learned["camera_size"] = list(capture_size)
+                learned["camera_controls"] = camera_controls(args)
+                save_calibration(learned, args.led_profile)
+                print(f"Saved LED training profile to {args.led_profile}")
+                return True
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+
+
 def preview(args):
     cap, frame, _ = open_camera(args)
     name = "SMARTIR PC camera preview - Q to quit"
     try:
+        signature = load_led_profile(args, (frame.shape[1], frame.shape[0]))
         view(name)
         baseline = [gray_bgr(frame)]
         baseline.extend(gray_bgr(read_frame(cap)) for _ in range(11))
         background = np.median(baseline, axis=0).astype(np.uint8)
-        camera_tracker = PulseTracker(release_ms=args.release_ms,
-                                      max_speed=6000, alpha=.6, deadband=.5)
+        camera_lock = CameraLock(hold_seconds=args.release_ms / 1000)
         while True:
             frame = read_frame(cap)
             current = gray_bgr(frame)
-            spot, mask, reason = find_spot(current, background,
-                                           min_delta=args.min_delta,
-                                           max_area=args.max_area,
-                                           preferred=camera_tracker.point if camera_tracker.active else None)
-            _, tracked = camera_tracker.update(spot, time.monotonic())
+            raw, mask, reason = find_spot(current, background,
+                                          min_delta=args.min_delta,
+                                          max_area=args.max_area,
+                                          preferred=camera_lock.preferred,
+                                          frame_bgr=frame, signature=signature)
+            spot, held, state = camera_lock.update(raw, time.monotonic())
             annotated = annotated_camera(frame, spot, reason,
-                                         held=tracked if spot is None else None)
-            draw_label(annotated, f"Sensitivity threshold: {args.min_delta} (lower if LED is dim)", 62)
+                                         held=held)
+            if state == "verifying":
+                draw_label(annotated, "Verifying repeated LED flash", 62)
+            draw_label(annotated, f"Threshold: {args.min_delta} | learned remote profile", 93)
             cv2.imshow(name, annotated)
             stable = mask == 0
             background[stable] = np.uint8(.97*background[stable] + .03*current[stable])
@@ -334,6 +456,7 @@ def calibrate(args):
     pairs = []
     name = "SMARTIR PC calibration"
     try:
+        signature = load_led_profile(args, capture_size)
         view(name, fullscreen=True)
         targets = target_positions(*display)
         for index, target in enumerate(targets):
@@ -358,7 +481,9 @@ def calibrate(args):
                     spot, _, reason = find_spot(current, background,
                                                 min_delta=args.min_delta,
                                                 max_area=args.max_area,
-                                                preferred=hold.point)
+                                                preferred=hold.point,
+                                                frame_bgr=frame,
+                                                signature=signature)
                     captured = hold.update(spot, time.monotonic())
                 status = calibration_screen(display, target, index, frame, spot,
                                             reason, hold, phase)
@@ -395,13 +520,13 @@ def run(args):
     capture_size = (frame.shape[1], frame.shape[0])
     output = None
     try:
+        signature = load_led_profile(args, capture_size)
         H, profile = load_calibration(args.calibration, capture_size, display)
         expected_source = "pc-ipcam" if args.stream_url else "pc-webcam"
         if profile.get("source") != expected_source or profile.get("camera_controls") != camera_controls(args):
             raise RuntimeError("Camera settings differ from PC calibration; recalibrate or use the same options")
         tracker = PulseTracker(release_ms=args.release_ms)
-        camera_tracker = PulseTracker(release_ms=args.release_ms,
-                                      max_speed=6000, alpha=.6, deadband=.5)
+        camera_lock = CameraLock(hold_seconds=args.release_ms / 1000)
         canvas = np.zeros((display[1], display[0], 3), np.uint8) if args.output == "canvas" else None
         if args.output == "mouse":
             print("WARNING: Without an IR-pass filter, changing visible light can cause false mouse clicks.")
@@ -418,17 +543,18 @@ def run(args):
         while True:
             frame = read_frame(cap)
             current = gray_bgr(frame)
-            spot, mask, reason = find_spot(current, background,
-                                           min_delta=args.min_delta,
-                                           max_area=args.max_area,
-                                           preferred=camera_tracker.point if camera_tracker.active else None)
-            _, camera_point = camera_tracker.update(spot, time.monotonic())
+            raw, mask, reason = find_spot(current, background,
+                                          min_delta=args.min_delta,
+                                          max_area=args.max_area,
+                                          preferred=camera_lock.preferred,
+                                          frame_bgr=frame, signature=signature)
+            spot, camera_point, _ = camera_lock.update(raw, time.monotonic())
             point = map_point(H, spot, display) if spot is not None else None
             event, smoothed = tracker.update(point, time.monotonic())
             if output is not None:
                 output.emit(event, smoothed)
                 annotated = annotated_camera(frame, spot, reason,
-                                             held=camera_point if spot is None else None)
+                                             held=camera_point)
                 draw_label(annotated, f"Mouse: {event}", 62)
                 cv2.imshow("SMARTIR PC tracking preview - Q to quit", annotated)
             else:
@@ -442,7 +568,7 @@ def run(args):
                 elif event == "up":
                     previous = None
                 visible = camera_inset(canvas.copy(), frame, spot, reason,
-                                       held=camera_point if spot is None else None)
+                                       held=camera_point)
                 cv2.imshow("SMARTIR PC whiteboard", visible)
             if not tracker.active:
                 stable = mask == 0
@@ -466,7 +592,7 @@ def gui(args):
     from tkinter import messagebox
     root = tk.Tk()
     root.title("SMARTIR PC camera")
-    root.geometry("540x420")
+    root.geometry("540x460")
     tk.Label(root, text="SMARTIR · PC camera test", font=("Segoe UI", 17, "bold")).pack(pady=12)
     tk.Label(root, text="Point the USB or IP camera at the entire laptop screen.\n"
                         "The IR emitter must face the camera at each crosshair.").pack(pady=5)
@@ -523,6 +649,7 @@ def gui(args):
         command_line = [sys.executable, str(Path(__file__).resolve()), command,
                         "--camera", str(camera), "--min-delta", str(delta),
                         "--calibration", str(args.calibration),
+                        "--led-profile", str(args.led_profile),
                         "--width", str(args.width), "--height", str(args.height),
                         "--fps", str(args.fps), "--max-area", str(args.max_area),
                         "--release-ms", str(args.release_ms),
@@ -545,10 +672,11 @@ def gui(args):
         root.after(300, poll_child)
 
     for label, command, output in (
-        ("1  Camera preview", "preview", None),
-        ("2  Calibrate screen", "calibrate", None),
-        ("3  Test whiteboard", "run", "canvas"),
-        ("4  Control desktop mouse", "run", "mouse"),
+        ("1  Teach IR remote (start here)", "learn", None),
+        ("2  Camera preview", "preview", None),
+        ("3  Calibrate screen", "calibrate", None),
+        ("4  Test whiteboard", "run", "canvas"),
+        ("5  Control desktop mouse", "run", "mouse"),
     ):
         tk.Button(root, text=label, width=31,
                   command=lambda c=command, o=output: launch(c, o)).pack(pady=4)
@@ -559,7 +687,7 @@ def gui(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", default="gui",
-                        choices=("gui", "doctor", "preview", "calibrate", "run"))
+                        choices=("gui", "doctor", "learn", "preview", "calibrate", "run"))
     parser.add_argument("--camera", type=int, default=0, help="Webcam index; try 1 for an external USB webcam")
     parser.add_argument("--stream-url", default=os.environ.get("SMARTIR_STREAM_URL", ""),
                         help="Optional HTTP(S) MJPEG or RTSP IP camera video URL; overrides --camera")
@@ -577,6 +705,7 @@ def main(argv=None):
     parser.add_argument("--no-auto-test", action="store_true",
                         help="Stop after calibration instead of opening the blank test canvas")
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CAL)
+    parser.add_argument("--led-profile", type=Path, default=DEFAULT_LED)
     parser.add_argument("--output", choices=("canvas", "mouse"), default="canvas")
     args = parser.parse_args(argv)
     if args.camera < 0 or min(args.width, args.height) < 160 or args.fps < 1 or args.min_delta < 1 or args.max_area < 2 or args.stream_timeout_ms < 100:
@@ -588,6 +717,9 @@ def main(argv=None):
             parser.error(str(exc))
     try:
         if args.command == "doctor": doctor(args)
+        elif args.command == "learn":
+            if learn(args):
+                preview(args)
         elif args.command == "preview": preview(args)
         elif args.command == "calibrate":
             calibrate(args)
