@@ -144,6 +144,88 @@ def draw_label(image, text, y=30):
                 .65, (255, 255, 255), 2, cv2.LINE_AA)
 
 
+class CalibrationHold:
+    """Require repeated detections at one position, allowing remote flicker."""
+
+    def __init__(self, required=8, tolerance=18, gap_seconds=.4):
+        self.required = required
+        self.tolerance = tolerance
+        self.gap_seconds = gap_seconds
+        self.samples = []
+        self.last_seen = None
+
+    @property
+    def progress(self):
+        return min(1.0, len(self.samples) / self.required)
+
+    @property
+    def point(self):
+        return tuple(np.median(self.samples, axis=0)) if self.samples else None
+
+    def update(self, spot, now):
+        if self.last_seen is not None and now - self.last_seen > self.gap_seconds:
+            self.samples.clear()
+            self.last_seen = None
+        if spot is None:
+            return False
+        if self.samples and np.linalg.norm(np.asarray(spot) - np.asarray(self.point)) > self.tolerance:
+            self.samples.clear()
+        self.samples.append(spot)
+        self.last_seen = now
+        return len(self.samples) >= self.required
+
+
+def annotated_camera(frame, spot, reason):
+    image = frame.copy()
+    if spot is not None:
+        center = tuple(round(v) for v in spot)
+        cv2.circle(image, center, 14, (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.drawMarker(image, center, (0, 255, 0), cv2.MARKER_CROSS, 10, 1)
+    cv2.rectangle(image, (0, 0), (image.shape[1], 37), (20, 20, 20), -1)
+    draw_label(image, "LIGHT DETECTED" if spot is not None else reason[:48], 26)
+    return image
+
+
+def camera_inset(canvas, frame, spot, reason, avoid=None):
+    """Draw the live camera at a corner away from the current target."""
+    height, width = canvas.shape[:2]
+    scale = min(width * .28 / frame.shape[1], height * .28 / frame.shape[0], 1.0)
+    inset_width = max(1, round(frame.shape[1] * scale))
+    inset_height = max(1, round(frame.shape[0] * scale))
+    image = cv2.resize(annotated_camera(frame, spot, reason),
+                       (inset_width, inset_height), interpolation=cv2.INTER_AREA)
+    pad = 18
+    corners = [(pad, pad), (width - inset_width - pad, pad),
+               (pad, height - inset_height - pad),
+               (width - inset_width - pad, height - inset_height - pad)]
+    if avoid is not None:
+        x, y = max(corners, key=lambda p: (p[0] + inset_width/2 - avoid[0])**2 +
+                                              (p[1] + inset_height/2 - avoid[1])**2)
+    else:
+        x, y = corners[1]
+    canvas[y:y+inset_height, x:x+inset_width] = image
+    cv2.rectangle(canvas, (x-2, y-2), (x+inset_width+1, y+inset_height+1),
+                  (0, 190, 255), 2)
+    return canvas
+
+
+def calibration_screen(display, target, index, frame, spot, reason, hold, phase):
+    canvas = np.zeros((display[1], display[0], 3), np.uint8)
+    center = tuple(round(v) for v in target)
+    cv2.drawMarker(canvas, center, (0, 180, 255), cv2.MARKER_CROSS, 42, 2)
+    cv2.circle(canvas, center, 37, (70, 70, 70), 4, cv2.LINE_AA)
+    if hold.progress:
+        cv2.ellipse(canvas, center, (37, 37), -90, 0, round(360*hold.progress),
+                    (0, 255, 0), 5, cv2.LINE_AA)
+    draw_label(canvas, f"Target {index+1}/9: aim remote at crosshair and hold its button")
+    draw_label(canvas, "Release remote between targets  |  Esc abort  |  Space skip optional point", 66)
+    status = ("Release remote: sampling background" if phase != "capture" else
+              f"{'Tracking light' if spot is not None else 'Waiting for light'}: "
+              f"{round(100*hold.progress)}%")
+    draw_label(canvas, status, 105)
+    return camera_inset(canvas, frame, spot, reason, avoid=target)
+
+
 def doctor(args):
     cap, frame, backend = open_webcam(args.camera, args.width, args.height,
                                       args.fps, args.exposure, args.gain)
@@ -197,20 +279,16 @@ def calibrate(args):
         view(name, fullscreen=True)
         targets = target_positions(*display)
         for index, target in enumerate(targets):
-            canvas = np.zeros((display[1], display[0], 3), np.uint8)
-            cv2.drawMarker(canvas, tuple(round(v) for v in target),
-                           (0, 180, 255), cv2.MARKER_CROSS, 42, 2)
-            draw_label(canvas, f"Target {index+1}/9: release remote, then press LED at crosshair")
-            draw_label(canvas, "First four corners required | ESC abort | SPACE skip extra point", 66)
-            cv2.imshow(name, canvas)
-            cv2.waitKey(20)
-            baseline, samples = [], []
+            baseline = []
+            hold = CalibrationHold()
             started = time.monotonic()
             phase = "settle"
+            captured = False
             while time.monotonic()-started < args.target_timeout:
                 frame = read_frame(cap)
                 current = gray_bgr(frame)
                 elapsed = time.monotonic()-started
+                spot, reason = None, "waiting for light"
                 if phase == "settle" and elapsed > .7:
                     phase = "baseline"
                 if phase == "baseline":
@@ -219,24 +297,28 @@ def calibrate(args):
                         background = np.median(baseline, axis=0).astype(np.uint8)
                         phase = "capture"
                 elif phase == "capture":
-                    spot, _, _ = find_spot(current, background,
-                                           min_delta=args.min_delta,
-                                           max_area=args.max_area)
-                    if spot is not None and (not samples or
-                        np.linalg.norm(np.asarray(spot)-np.median(samples, axis=0)) < 18):
-                        samples.append(spot)
-                    if len(samples) >= 3:
-                        pairs.append((tuple(np.median(samples, axis=0)), target))
-                        break
-                status = canvas.copy()
-                draw_label(status, f"{phase}: {len(samples)}/3 camera hits", 105)
+                    spot, _, reason = find_spot(current, background,
+                                                min_delta=args.min_delta,
+                                                max_area=args.max_area)
+                    captured = hold.update(spot, time.monotonic())
+                status = calibration_screen(display, target, index, frame, spot,
+                                            reason, hold, phase)
                 cv2.imshow(name, status)
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:
                     raise KeyboardInterrupt()
-                if key == 32:
+                if key == 32 and index >= 4:
                     break
-            print(f"Target {index+1}: {'captured' if len(samples)>=3 else 'missed'}")
+                if captured:
+                    pairs.append((hold.point, target))
+                    confirmation = calibration_screen(display, target, index, frame,
+                                                      spot, "captured", hold, "capture")
+                    cv2.putText(confirmation, "POINT CALIBRATED", (30, display[1]-45),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3, cv2.LINE_AA)
+                    cv2.imshow(name, confirmation)
+                    cv2.waitKey(450)
+                    break
+            print(f"Target {index+1}: {'captured' if captured else 'missed'}")
         profile = fit_calibration(pairs, capture_size, display)
         profile["source"] = "pc-webcam"
         profile["camera_controls"] = camera_controls(args)
@@ -282,10 +364,9 @@ def run(args):
             event, smoothed = tracker.update(point, time.monotonic())
             if output is not None:
                 output.emit(event, smoothed)
-                if spot is not None:
-                    cv2.circle(frame, tuple(round(v) for v in spot), 9, (0, 255, 0), 2)
-                draw_label(frame, f"{reason} | {event}")
-                cv2.imshow("SMARTIR PC tracking preview - Q to quit", frame)
+                annotated = annotated_camera(frame, spot, reason)
+                draw_label(annotated, f"Mouse: {event}", 62)
+                cv2.imshow("SMARTIR PC tracking preview - Q to quit", annotated)
             else:
                 if event == "down" and smoothed is not None:
                     previous = tuple(round(v) for v in smoothed)
@@ -296,7 +377,8 @@ def run(args):
                     previous = point_px
                 elif event == "up":
                     previous = None
-                cv2.imshow("SMARTIR PC whiteboard", canvas)
+                visible = camera_inset(canvas.copy(), frame, spot, reason)
+                cv2.imshow("SMARTIR PC whiteboard", visible)
             if not tracker.active:
                 stable = mask == 0
                 background[stable] = np.uint8(.97*background[stable] + .03*current[stable])

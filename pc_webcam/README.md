@@ -33,6 +33,11 @@ its own screen plane; place an external USB webcam facing the display. During
 calibration, place the remote's emitting LED at each crosshair and aim it
 toward that webcam. Four corner targets are mandatory; five more improve and
 validate the mapping. Release the remote before each new target appears.
+The calibration screen now includes a live camera view. A green circle marks
+the detected light in that view; the ring around the target fills as the
+camera repeatedly sees a stable spot. Wait for **POINT CALIBRATED** before
+moving to the next target. The test whiteboard has the same live annotated
+camera view in a corner; the inset itself is not saved into the drawing.
 
 This is a bright-spot detector, not a spectral IR detector. If your webcam
 can see the remote LED, testing is possible, but an unfiltered webcam can
