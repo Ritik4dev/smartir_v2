@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+smartir-calibration.json
+smartir-calibration.json.tmp
+smartir-snapshot.png
