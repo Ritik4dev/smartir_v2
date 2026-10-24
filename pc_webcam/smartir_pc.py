@@ -420,6 +420,11 @@ def gui(args):
             root.after(300, poll_child)
         else:
             root.deiconify()
+            if process is not None and process.returncode:
+                _, errors = process.communicate()
+                messagebox.showerror("SMARTIR camera error", errors.strip() or
+                                     f"Mode exited with code {process.returncode}. "
+                                     "Check that the webcam is connected and not open elsewhere.")
 
     def launch(command, output=None):
         nonlocal process
@@ -451,7 +456,7 @@ def gui(args):
             command_line += ["--gain", str(args.gain)]
         if output is not None:
             command_line += ["--output", output]
-        process = subprocess.Popen(command_line)
+        process = subprocess.Popen(command_line, stderr=subprocess.PIPE, text=True)
         root.withdraw()
         root.after(300, poll_child)
 
