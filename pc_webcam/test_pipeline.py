@@ -40,6 +40,43 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(spot)
         self.assertIn("ambiguous", reason)
 
+    def test_tracking_prefers_same_light_over_new_brighter_light(self):
+        background = np.full((120, 160), 20, np.uint8)
+        current = background.copy()
+        cv2.circle(current, (44, 50), 2, 110, -1)
+        cv2.circle(current, (130, 70), 2, 220, -1)
+        spot, _, reason = find_spot(current, background,
+                                     preferred=(42, 50), max_jump=25)
+        self.assertEqual(reason, "tracked compact spot")
+        self.assertLess(np.linalg.norm(np.asarray(spot) - (44, 50)), 2)
+
+    def test_tracking_waits_instead_of_jumping_to_far_lamp(self):
+        background = np.full((120, 160), 20, np.uint8)
+        current = background.copy()
+        cv2.circle(current, (130, 70), 2, 220, -1)
+        spot, _, reason = find_spot(current, background,
+                                     preferred=(20, 20), max_jump=25)
+        self.assertIsNone(spot)
+        self.assertIn("same light", reason)
+
+    def test_moving_light_remains_tracked(self):
+        background = np.full((120, 160), 20, np.uint8)
+        previous = (40, 50)
+        for x in (48, 57, 66, 75):
+            current = background.copy()
+            cv2.circle(current, (x, 50), 2, 125, -1)
+            spot, _, reason = find_spot(current, background, preferred=previous)
+            self.assertEqual(reason, "tracked compact spot")
+            self.assertLess(np.linalg.norm(np.asarray(spot) - (x, 50)), 2)
+            previous = spot
+
+    def test_long_bright_streak_is_not_round_led(self):
+        background = np.full((120, 160), 20, np.uint8)
+        current = background.copy()
+        cv2.line(current, (30, 60), (55, 60), 180, 1)
+        spot, _, _ = find_spot(current, background)
+        self.assertIsNone(spot)
+
     def test_new_spot_not_static_bright_patch(self):
         background = np.zeros((120, 160), np.uint8)
         cv2.circle(background, (45, 50), 4, 180, -1)

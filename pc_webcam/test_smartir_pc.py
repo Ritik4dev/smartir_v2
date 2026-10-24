@@ -9,7 +9,7 @@ import numpy as np
 
 from smartir_pc import (CalibrationHold, WindowsMouse, annotated_camera,
                         calibration_screen, camera_controls, camera_inset,
-                        gray_bgr, open_camera, open_ip_stream,
+                        gray_bgr, main, open_camera, open_ip_stream,
                         validate_stream_url)
 
 
@@ -28,6 +28,19 @@ class FakeUser32:
 
 
 class PcTests(unittest.TestCase):
+    def test_calibration_opens_canvas_after_success(self):
+        with patch("smartir_pc.calibrate") as calibrate, patch("smartir_pc.run") as run:
+            self.assertEqual(main(["calibrate"]), 0)
+        calibrate.assert_called_once()
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0].output, "canvas")
+
+    def test_calibration_can_stop_without_auto_test(self):
+        with patch("smartir_pc.calibrate") as calibrate, patch("smartir_pc.run") as run:
+            self.assertEqual(main(["calibrate", "--no-auto-test"]), 0)
+        calibrate.assert_called_once()
+        run.assert_not_called()
+
     def test_ip_stream_url_validation(self):
         for url in ("http://192.168.1.5:8080/video", "https://cam.example/live",
                     "rtsp://user:pass@192.168.1.6/stream"):

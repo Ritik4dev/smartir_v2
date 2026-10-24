@@ -227,24 +227,27 @@ class CalibrationHold:
         return len(self.samples) >= self.required
 
 
-def annotated_camera(frame, spot, reason):
+def annotated_camera(frame, spot, reason, held=None):
     image = frame.copy()
-    if spot is not None:
-        center = tuple(round(v) for v in spot)
-        cv2.circle(image, center, 14, (0, 255, 0), 2, cv2.LINE_AA)
-        cv2.drawMarker(image, center, (0, 255, 0), cv2.MARKER_CROSS, 10, 1)
+    shown = spot if spot is not None else held
+    if shown is not None:
+        center = tuple(round(v) for v in shown)
+        color = (0, 255, 0) if spot is not None else (0, 190, 255)
+        cv2.circle(image, center, 14, color, 2, cv2.LINE_AA)
+        cv2.drawMarker(image, center, color, cv2.MARKER_CROSS, 10, 1)
     cv2.rectangle(image, (0, 0), (image.shape[1], 37), (20, 20, 20), -1)
-    draw_label(image, "LIGHT DETECTED" if spot is not None else reason[:48], 26)
+    label = "LIGHT DETECTED" if spot is not None else ("SIGNAL HELD" if held is not None else reason[:48])
+    draw_label(image, label, 26)
     return image
 
 
-def camera_inset(canvas, frame, spot, reason, avoid=None):
+def camera_inset(canvas, frame, spot, reason, avoid=None, held=None):
     """Draw the live camera at a corner away from the current target."""
     height, width = canvas.shape[:2]
     scale = min(width * .28 / frame.shape[1], height * .28 / frame.shape[0], 1.0)
     inset_width = max(1, round(frame.shape[1] * scale))
     inset_height = max(1, round(frame.shape[0] * scale))
-    image = cv2.resize(annotated_camera(frame, spot, reason),
+    image = cv2.resize(annotated_camera(frame, spot, reason, held=held),
                        (inset_width, inset_height), interpolation=cv2.INTER_AREA)
     pad = 18
     corners = [(pad, pad), (width - inset_width - pad, pad),
@@ -275,7 +278,8 @@ def calibration_screen(display, target, index, frame, spot, reason, hold, phase)
               f"{'Tracking light' if spot is not None else 'Waiting for light'}: "
               f"{round(100*hold.progress)}%")
     draw_label(canvas, status, 105)
-    return camera_inset(canvas, frame, spot, reason, avoid=target)
+    return camera_inset(canvas, frame, spot, reason, avoid=target,
+                        held=hold.point if spot is None else None)
 
 
 def doctor(args):
@@ -300,17 +304,20 @@ def preview(args):
         baseline = [gray_bgr(frame)]
         baseline.extend(gray_bgr(read_frame(cap)) for _ in range(11))
         background = np.median(baseline, axis=0).astype(np.uint8)
+        camera_tracker = PulseTracker(release_ms=args.release_ms,
+                                      max_speed=6000, alpha=.6, deadband=.5)
         while True:
             frame = read_frame(cap)
             current = gray_bgr(frame)
             spot, mask, reason = find_spot(current, background,
                                            min_delta=args.min_delta,
-                                           max_area=args.max_area)
-            if spot is not None:
-                cv2.circle(frame, tuple(round(v) for v in spot), 9, (0, 255, 0), 2)
-            draw_label(frame, reason)
-            draw_label(frame, f"Sensitivity threshold: {args.min_delta} (lower in GUI if LED is dim)", 62)
-            cv2.imshow(name, frame)
+                                           max_area=args.max_area,
+                                           preferred=camera_tracker.point if camera_tracker.active else None)
+            _, tracked = camera_tracker.update(spot, time.monotonic())
+            annotated = annotated_camera(frame, spot, reason,
+                                         held=tracked if spot is None else None)
+            draw_label(annotated, f"Sensitivity threshold: {args.min_delta} (lower if LED is dim)", 62)
+            cv2.imshow(name, annotated)
             stable = mask == 0
             background[stable] = np.uint8(.97*background[stable] + .03*current[stable])
             if cv2.waitKey(1) & 0xFF in (27, ord("q")):
@@ -350,7 +357,8 @@ def calibrate(args):
                 elif phase == "capture":
                     spot, _, reason = find_spot(current, background,
                                                 min_delta=args.min_delta,
-                                                max_area=args.max_area)
+                                                max_area=args.max_area,
+                                                preferred=hold.point)
                     captured = hold.update(spot, time.monotonic())
                 status = calibration_screen(display, target, index, frame, spot,
                                             reason, hold, phase)
@@ -392,6 +400,8 @@ def run(args):
         if profile.get("source") != expected_source or profile.get("camera_controls") != camera_controls(args):
             raise RuntimeError("Camera settings differ from PC calibration; recalibrate or use the same options")
         tracker = PulseTracker(release_ms=args.release_ms)
+        camera_tracker = PulseTracker(release_ms=args.release_ms,
+                                      max_speed=6000, alpha=.6, deadband=.5)
         canvas = np.zeros((display[1], display[0], 3), np.uint8) if args.output == "canvas" else None
         if args.output == "mouse":
             print("WARNING: Without an IR-pass filter, changing visible light can cause false mouse clicks.")
@@ -410,12 +420,15 @@ def run(args):
             current = gray_bgr(frame)
             spot, mask, reason = find_spot(current, background,
                                            min_delta=args.min_delta,
-                                           max_area=args.max_area)
+                                           max_area=args.max_area,
+                                           preferred=camera_tracker.point if camera_tracker.active else None)
+            _, camera_point = camera_tracker.update(spot, time.monotonic())
             point = map_point(H, spot, display) if spot is not None else None
             event, smoothed = tracker.update(point, time.monotonic())
             if output is not None:
                 output.emit(event, smoothed)
-                annotated = annotated_camera(frame, spot, reason)
+                annotated = annotated_camera(frame, spot, reason,
+                                             held=camera_point if spot is None else None)
                 draw_label(annotated, f"Mouse: {event}", 62)
                 cv2.imshow("SMARTIR PC tracking preview - Q to quit", annotated)
             else:
@@ -428,7 +441,8 @@ def run(args):
                     previous = point_px
                 elif event == "up":
                     previous = None
-                visible = camera_inset(canvas.copy(), frame, spot, reason)
+                visible = camera_inset(canvas.copy(), frame, spot, reason,
+                                       held=camera_point if spot is None else None)
                 cv2.imshow("SMARTIR PC whiteboard", visible)
             if not tracker.active:
                 stable = mask == 0
@@ -558,8 +572,10 @@ def main(argv=None):
     parser.add_argument("--gain", type=float, help="Optional backend-specific camera gain")
     parser.add_argument("--min-delta", type=int, default=18)
     parser.add_argument("--max-area", type=int, default=250)
-    parser.add_argument("--release-ms", type=int, default=170)
+    parser.add_argument("--release-ms", type=int, default=300)
     parser.add_argument("--target-timeout", type=float, default=8.0)
+    parser.add_argument("--no-auto-test", action="store_true",
+                        help="Stop after calibration instead of opening the blank test canvas")
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CAL)
     parser.add_argument("--output", choices=("canvas", "mouse"), default="canvas")
     args = parser.parse_args(argv)
@@ -573,7 +589,12 @@ def main(argv=None):
     try:
         if args.command == "doctor": doctor(args)
         elif args.command == "preview": preview(args)
-        elif args.command == "calibrate": calibrate(args)
+        elif args.command == "calibrate":
+            calibrate(args)
+            if not args.no_auto_test:
+                print("Calibration saved; opening the test whiteboard. Press C to clear, Q to quit.")
+                args.output = "canvas"
+                run(args)
         elif args.command == "run": run(args)
         else: gui(args)
     except KeyboardInterrupt:

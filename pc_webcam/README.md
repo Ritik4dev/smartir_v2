@@ -60,6 +60,15 @@ the detected light in that view; the ring around the target fills as the
 camera repeatedly sees a stable spot. Wait for **POINT CALIBRATED** before
 moving to the next target. The test whiteboard has the same live annotated
 camera view in a corner; the inset itself is not saved into the drawing.
+After a successful calibration the app automatically opens the blank test
+whiteboard; press **C** to clear it or **Q** to close it. CLI users can pass
+`--no-auto-test` to stop after saving the calibration instead.
+The detector now rejects elongated bright streaks and prefers a compact spot
+near the one it was already following, so a brighter lamp elsewhere is less
+likely to steal the track. A green ring is a fresh detection; an amber ring
+marked **SIGNAL HELD** means the camera missed a frame but tracking is being
+held briefly for a pulsing TV remote. This does not prove the held light is
+still on.
 If the LED is visible in the preview but has no green circle, lower the GUI
 brightness threshold from 18 toward 10, then preview again. Lower values are
 more sensitive but may also catch moving visible reflections. Keep the remote
