@@ -1,32 +1,5 @@
-SMARTIR v2 dependencies — Raspberry Pi OS (Bullseye or newer)
-
-Use the OS Python: /usr/bin/python3
-Install with apt, not pip. Picamera2 must match Raspberry Pi OS libcamera.
-
-Headless camera tests on Raspberry Pi OS Lite:
-  sudo apt update
-  sudo apt install -y python3-picamera2 python3-opencv python3-numpy
-
-Desktop calibration, preview, GUI, and virtual touchscreen:
-  sudo apt update
-  sudo apt install -y python3-picamera2 python3-opencv python3-numpy python3-tk python3-evdev
-
-Operating-system requirements for touch:
-  - A graphical desktop session on the Pi's HDMI display (Lite alone has none).
-  - Linux uinput kernel module and permission to write /dev/uinput.
-  - Check first: sudo modprobe uinput && ls -l /dev/uinput
-
-Python imports used:
-  picamera2   (provided by python3-picamera2)
-  cv2         (provided by python3-opencv)
-  numpy       (provided by python3-numpy)
-  tkinter     (provided by python3-tk; GUI/desktop only)
-  evdev       (provided by python3-evdev; touch output only)
-
-Do not use the legacy repository requirements.txt for smartir_v2.py:
-it lists pip wheels and does not describe the Pi camera or input stack.
-
-Verify after installation:
-  rpicam-hello --list-cameras
-  /usr/bin/python3 smartir_v2.py doctor --camera-test
-  /usr/bin/python3 -m unittest test_smartir_v2.py
+python3-picamera2
+python3-opencv
+python3-numpy
+python3-tk
+python3-evdev
