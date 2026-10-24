@@ -79,7 +79,11 @@ def ensure_dependencies(python: str) -> None:
     subprocess.run(["sudo", "apt-get", "install", "-y", *packages], check=True)
     problem = missing_imports(python)
     if problem is not None:
-        raise RuntimeError(f"Packages installed, but the OS Python still cannot import them: {problem}")
+        raise RuntimeError(
+            "Packages installed, but the OS Python still cannot import them. "
+            "Do not create a manual library symlink; inspect package health.\n"
+            f"Import error: {problem}"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -100,6 +104,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if not arguments:
         arguments = ["gui"] if (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) else ["doctor", "--camera-test"]
+    if arguments[0] == "gui" and platform.system() == "Linux" and os.geteuid() == 0:
+        print("SMARTIR error: launch the GUI as your signed-in desktop user, not root. "
+              "Type 'exit' to leave the root shell, then run 'python3 smartir.py'.",
+              file=sys.stderr)
+        return 1
     try:
         return subprocess.run([python, str(CORE), *arguments], check=False).returncode
     except KeyboardInterrupt:

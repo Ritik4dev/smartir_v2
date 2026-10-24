@@ -3,3 +3,4 @@ python3-opencv
 python3-numpy
 python3-tk
 python3-evdev
+libjsoncpp26

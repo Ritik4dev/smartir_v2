@@ -11,7 +11,7 @@ class LauncherTests(unittest.TestCase):
     def test_package_manifest_is_safe(self):
         self.assertEqual(smartir.apt_packages(), [
             "python3-picamera2", "python3-opencv", "python3-numpy",
-            "python3-tk", "python3-evdev",
+            "python3-tk", "python3-evdev", "libjsoncpp26",
         ])
 
     def test_no_install_when_imports_work(self):
@@ -20,6 +20,19 @@ class LauncherTests(unittest.TestCase):
              patch.object(smartir.subprocess, "run") as run:
             smartir.ensure_dependencies("/usr/bin/python3")
             run.assert_not_called()
+
+    def test_missing_jsoncpp_installs_manifest_and_rechecks(self):
+        with patch.object(smartir, "on_raspberry_pi", return_value=True), \
+             patch.object(smartir, "missing_imports", side_effect=[
+                 "ImportError: libjsoncpp.so.26: cannot open shared object file", None,
+             ]) as imports, \
+             patch.object(smartir.sys.stdin, "isatty", return_value=True), \
+             patch("builtins.input", return_value="y"), \
+             patch.object(smartir.subprocess, "run") as run, \
+             patch("sys.stderr", new_callable=io.StringIO):
+            smartir.ensure_dependencies("/usr/bin/python3")
+            self.assertEqual(imports.call_count, 2)
+            self.assertIn("libjsoncpp26", run.call_args_list[-1].args[0])
 
     def test_noninteractive_missing_packages_does_not_install(self):
         with patch.object(smartir, "on_raspberry_pi", return_value=True), \
