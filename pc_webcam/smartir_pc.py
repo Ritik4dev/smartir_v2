@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Windows webcam version of SMARTIR. Run with no arguments for the GUI."""
+"""Windows webcam/IP-camera version of SMARTIR. Run with no arguments for the GUI."""
 
 from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
+import os
 from pathlib import Path
 import platform
 import subprocess
 import sys
 import time
+from urllib.parse import urlsplit
 
 import cv2
 import numpy as np
@@ -82,10 +85,55 @@ def open_webcam(index, width, height, fps, exposure=None, gain=None):
     raise RuntimeError(f"Webcam {index} unavailable ({'; '.join(failures)}). Close other camera apps or try --camera 1.")
 
 
+def validate_stream_url(url):
+    """Accept only live network camera URLs, never local files or paths."""
+    try:
+        parsed = urlsplit(url)
+        valid = parsed.scheme.lower() in ("http", "https", "rtsp") and parsed.hostname
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("IP camera URL must be an http://, https://, or rtsp:// video stream")
+    return url
+
+
+def open_ip_stream(url, timeout_ms=5000):
+    validate_stream_url(url)
+    params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout_ms,
+              cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout_ms]
+    try:
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)
+    except cv2.error:
+        # Older OpenCV builds may lack the Python constructor with params.
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+    if not cap.isOpened():
+        cap.release()
+        cap = cv2.VideoCapture(url, cv2.CAP_ANY)
+    if not cap.isOpened():
+        cap.release()
+        raise RuntimeError("IP camera stream could not open. Check its video URL, Wi-Fi, and camera app.")
+    try:
+        ok, frame = cap.read()
+    except cv2.error as exc:
+        cap.release()
+        raise RuntimeError("IP camera connected but could not decode video frames") from exc
+    if not ok or frame is None or not frame.size:
+        cap.release()
+        raise RuntimeError("IP camera connected but returned no video frames. Use a live MJPEG or RTSP video URL, not a snapshot page.")
+    return cap, frame, int(cap.get(cv2.CAP_PROP_BACKEND))
+
+
+def open_camera(args):
+    if args.stream_url:
+        return open_ip_stream(args.stream_url, args.stream_timeout_ms)
+    return open_webcam(args.camera, args.width, args.height,
+                       args.fps, args.exposure, args.gain)
+
+
 def read_frame(cap):
     ok, frame = cap.read()
     if not ok or frame is None or not frame.size:
-        raise RuntimeError("Webcam stopped delivering frames; close other apps and reconnect it")
+        raise RuntimeError("Camera stopped delivering frames; check its connection and restart the mode")
     return frame
 
 
@@ -130,6 +178,8 @@ class WindowsMouse:
 
 
 def camera_controls(args):
+    if args.stream_url:
+        return {"stream_sha256": hashlib.sha256(args.stream_url.encode("utf-8")).hexdigest()}
     return {"camera_index": args.camera, "requested_width": args.width,
             "requested_height": args.height, "fps": args.fps,
             "exposure": args.exposure, "gain": args.gain}
@@ -229,22 +279,21 @@ def calibration_screen(display, target, index, frame, spot, reason, hold, phase)
 
 
 def doctor(args):
-    cap, frame, backend = open_webcam(args.camera, args.width, args.height,
-                                      args.fps, args.exposure, args.gain)
+    cap, frame, backend = open_camera(args)
     try:
-        print(f"Webcam {args.camera}: OK, backend {backend}, frame {frame.shape[1]}x{frame.shape[0]}")
+        source = "IP camera" if args.stream_url else f"Webcam {args.camera}"
+        print(f"{source}: OK, backend {backend}, frame {frame.shape[1]}x{frame.shape[0]}")
         print(f"Brightness range: {gray_bgr(frame).min()}..{gray_bgr(frame).max()}")
         print(f"Actual FPS setting reported: {cap.get(cv2.CAP_PROP_FPS):.1f}")
-        if args.exposure is not None:
+        if args.exposure is not None and not args.stream_url:
             print(f"Actual exposure setting reported: {cap.get(cv2.CAP_PROP_EXPOSURE)}")
-        print("A laptop's built-in webcam may not see its own screen plane; an external webcam must face the whole display.")
+        print("The camera must face the whole display before calibration.")
     finally:
         cap.release()
 
 
 def preview(args):
-    cap, frame, _ = open_webcam(args.camera, args.width, args.height,
-                                args.fps, args.exposure, args.gain)
+    cap, frame, _ = open_camera(args)
     name = "SMARTIR PC camera preview - Q to quit"
     try:
         view(name)
@@ -273,8 +322,7 @@ def preview(args):
 
 def calibrate(args):
     display = screen_size()
-    cap, frame, _ = open_webcam(args.camera, args.width, args.height,
-                                args.fps, args.exposure, args.gain)
+    cap, frame, _ = open_camera(args)
     capture_size = (frame.shape[1], frame.shape[0])
     pairs = []
     name = "SMARTIR PC calibration"
@@ -323,7 +371,7 @@ def calibrate(args):
                     break
             print(f"Target {index+1}: {'captured' if captured else 'missed'}")
         profile = fit_calibration(pairs, capture_size, display)
-        profile["source"] = "pc-webcam"
+        profile["source"] = "pc-ipcam" if args.stream_url else "pc-webcam"
         profile["camera_controls"] = camera_controls(args)
         save_calibration(profile, args.calibration)
         print(f"Saved {args.calibration}; {len(pairs)}/9 targets; "
@@ -335,13 +383,13 @@ def calibrate(args):
 
 def run(args):
     display = screen_size()
-    cap, frame, _ = open_webcam(args.camera, args.width, args.height,
-                                args.fps, args.exposure, args.gain)
+    cap, frame, _ = open_camera(args)
     capture_size = (frame.shape[1], frame.shape[0])
     output = None
     try:
         H, profile = load_calibration(args.calibration, capture_size, display)
-        if profile.get("source") != "pc-webcam" or profile.get("camera_controls") != camera_controls(args):
+        expected_source = "pc-ipcam" if args.stream_url else "pc-webcam"
+        if profile.get("source") != expected_source or profile.get("camera_controls") != camera_controls(args):
             raise RuntimeError("Camera settings differ from PC calibration; recalibrate or use the same options")
         tracker = PulseTracker(release_ms=args.release_ms)
         canvas = np.zeros((display[1], display[0], 3), np.uint8) if args.output == "canvas" else None
@@ -403,11 +451,11 @@ def gui(args):
     import tkinter as tk
     from tkinter import messagebox
     root = tk.Tk()
-    root.title("SMARTIR PC webcam")
-    root.geometry("480x340")
-    tk.Label(root, text="SMARTIR · PC webcam test", font=("Segoe UI", 17, "bold")).pack(pady=12)
-    tk.Label(root, text="Place an external webcam where it can see the entire laptop screen.\n"
-                        "The IR emitter must face the webcam at each crosshair.").pack(pady=5)
+    root.title("SMARTIR PC camera")
+    root.geometry("540x420")
+    tk.Label(root, text="SMARTIR · PC camera test", font=("Segoe UI", 17, "bold")).pack(pady=12)
+    tk.Label(root, text="Point the USB or IP camera at the entire laptop screen.\n"
+                        "The IR emitter must face the camera at each crosshair.").pack(pady=5)
     controls = tk.Frame(root)
     controls.pack(pady=8)
     tk.Label(controls, text="Webcam index").grid(row=0, column=0, padx=6)
@@ -416,6 +464,11 @@ def gui(args):
     tk.Label(controls, text="Brightness threshold").grid(row=0, column=2, padx=6)
     threshold = tk.StringVar(value=str(args.min_delta))
     tk.Spinbox(controls, from_=5, to=200, textvariable=threshold, width=5).grid(row=0, column=3)
+    tk.Label(root, text="IP camera video URL (optional; overrides webcam index)").pack(pady=(7, 1))
+    stream_url = tk.StringVar(value=args.stream_url or "")
+    tk.Entry(root, textvariable=stream_url, width=66).pack(pady=2)
+    tk.Label(root, text="Examples: http://192.168.1.5:8080/video  or  rtsp://192.168.1.5/live",
+             fg="#555555").pack(pady=(0, 8))
     process = None
 
     def poll_child():
@@ -442,6 +495,13 @@ def gui(args):
         except ValueError:
             messagebox.showerror("SMARTIR", "Camera index and threshold must be valid numbers")
             return
+        url = stream_url.get().strip()
+        if url:
+            try:
+                validate_stream_url(url)
+            except ValueError as exc:
+                messagebox.showerror("SMARTIR", str(exc))
+                return
         if output == "mouse" and not messagebox.askyesno(
             "Enable desktop mouse?", "Visible-light changes may cause false clicks without an IR-pass filter. Continue?"
         ):
@@ -452,14 +512,21 @@ def gui(args):
                         "--width", str(args.width), "--height", str(args.height),
                         "--fps", str(args.fps), "--max-area", str(args.max_area),
                         "--release-ms", str(args.release_ms),
-                        "--target-timeout", str(args.target_timeout)]
+                        "--target-timeout", str(args.target_timeout),
+                        "--stream-timeout-ms", str(args.stream_timeout_ms)]
         if args.exposure is not None:
             command_line += ["--exposure", str(args.exposure)]
         if args.gain is not None:
             command_line += ["--gain", str(args.gain)]
         if output is not None:
             command_line += ["--output", output]
-        process = subprocess.Popen(command_line, stderr=subprocess.PIPE, text=True)
+        child_env = os.environ.copy()
+        if url:
+            child_env["SMARTIR_STREAM_URL"] = url
+        else:
+            child_env.pop("SMARTIR_STREAM_URL", None)
+        process = subprocess.Popen(command_line, stderr=subprocess.PIPE,
+                                   text=True, env=child_env)
         root.withdraw()
         root.after(300, poll_child)
 
@@ -480,6 +547,10 @@ def main(argv=None):
     parser.add_argument("command", nargs="?", default="gui",
                         choices=("gui", "doctor", "preview", "calibrate", "run"))
     parser.add_argument("--camera", type=int, default=0, help="Webcam index; try 1 for an external USB webcam")
+    parser.add_argument("--stream-url", default=os.environ.get("SMARTIR_STREAM_URL", ""),
+                        help="Optional HTTP(S) MJPEG or RTSP IP camera video URL; overrides --camera")
+    parser.add_argument("--stream-timeout-ms", type=int, default=5000,
+                        help="IP camera open/read timeout in milliseconds")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
@@ -492,8 +563,13 @@ def main(argv=None):
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CAL)
     parser.add_argument("--output", choices=("canvas", "mouse"), default="canvas")
     args = parser.parse_args(argv)
-    if args.camera < 0 or min(args.width, args.height) < 160 or args.fps < 1 or args.min_delta < 1 or args.max_area < 2:
+    if args.camera < 0 or min(args.width, args.height) < 160 or args.fps < 1 or args.min_delta < 1 or args.max_area < 2 or args.stream_timeout_ms < 100:
         parser.error("Invalid camera or detector setting")
+    if args.stream_url:
+        try:
+            validate_stream_url(args.stream_url)
+        except ValueError as exc:
+            parser.error(str(exc))
     try:
         if args.command == "doctor": doctor(args)
         elif args.command == "preview": preview(args)

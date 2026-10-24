@@ -4,6 +4,9 @@ This folder is the PC version. It reuses the detection, homography, and
 smoothing functions from `../smartir_v2.py`, but opens an ordinary webcam and
 saves its **own** `pc-calibration.json`. Do not copy calibration between the
 Pi and PC: the camera and geometry differ.
+It also accepts an IP camera's live HTTP(S) MJPEG or RTSP video stream. An IP
+camera must be on a reachable network; a webpage or single JPEG snapshot URL
+is not a continuous video stream.
 The PC detector uses the already-required OpenCV connected-components API
 to find small, newly brighter spots, including one-pixel LEDs. No separate
 heavy tracking package or model download is needed.
@@ -19,6 +22,13 @@ Or if `python` is your working command, replace `py` with `python`.
 The GUI buttons guide you through preview, calibration, canvas test, and
 optional desktop mouse control. Start with camera preview. If the external
 USB webcam is index 1, change the index in the GUI or use `--camera 1`.
+To use an IP camera, paste its **video stream URL** into the optional GUI field.
+That overrides the webcam index. A typical phone IP-camera app might expose
+`http://192.168.1.5:8080/video`; use the actual URL shown by your app. A
+camera may instead expose a `rtsp://...` URL. Keep the phone and PC on the
+same reachable network. The GUI passes the URL to its child via an environment
+variable; the calibration file stores only its SHA-256 fingerprint, not the
+URL or any embedded password.
 
 CLI equivalents:
 
@@ -28,7 +38,16 @@ py smartir_pc.py preview --camera 0
 py smartir_pc.py calibrate --camera 0
 py smartir_pc.py run --camera 0 --output canvas
 py smartir_pc.py run --camera 0 --output mouse
+py smartir_pc.py doctor --stream-url "http://192.168.1.5:8080/video"
+py smartir_pc.py preview --stream-url "rtsp://192.168.1.5/live"
 ```
+
+For a CLI URL containing a password, set `SMARTIR_STREAM_URL` in your shell
+instead of writing it in a command (where it may appear in process listings).
+The IP camera's stream resolution is controlled by the camera app, not the
+`--width` and `--height` webcam options. If the stream URL or resolution
+changes, recalibrate. OpenCV's FFmpeg backend is used where available, with
+a generic backend fallback. No additional Python dependency is required.
 
 The camera **must see the whole laptop display** for calibration. A built-in
 webcam mounted above a laptop screen generally faces the user and cannot see
