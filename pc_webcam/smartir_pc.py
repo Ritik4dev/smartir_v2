@@ -14,9 +14,11 @@ import time
 import cv2
 import numpy as np
 
+from detector import find_pc_spot as find_spot
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from smartir_v2 import (PulseTracker, find_spot, fit_calibration,
+from smartir_v2 import (PulseTracker, fit_calibration,
                         load_calibration, map_point, save_calibration,
                         target_positions)
 
@@ -258,6 +260,7 @@ def preview(args):
             if spot is not None:
                 cv2.circle(frame, tuple(round(v) for v in spot), 9, (0, 255, 0), 2)
             draw_label(frame, reason)
+            draw_label(frame, f"Sensitivity threshold: {args.min_delta} (lower in GUI if LED is dim)", 62)
             cv2.imshow(name, frame)
             stable = mask == 0
             background[stable] = np.uint8(.97*background[stable] + .03*current[stable])
@@ -482,7 +485,7 @@ def main(argv=None):
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--exposure", type=float, help="Optional backend-specific manual exposure value")
     parser.add_argument("--gain", type=float, help="Optional backend-specific camera gain")
-    parser.add_argument("--min-delta", type=int, default=28)
+    parser.add_argument("--min-delta", type=int, default=18)
     parser.add_argument("--max-area", type=int, default=250)
     parser.add_argument("--release-ms", type=int, default=170)
     parser.add_argument("--target-timeout", type=float, default=8.0)

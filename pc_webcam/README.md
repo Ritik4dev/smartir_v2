@@ -4,6 +4,9 @@ This folder is the PC version. It reuses the detection, homography, and
 smoothing functions from `../smartir_v2.py`, but opens an ordinary webcam and
 saves its **own** `pc-calibration.json`. Do not copy calibration between the
 Pi and PC: the camera and geometry differ.
+The PC detector uses the already-required OpenCV connected-components API
+to find small, newly brighter spots, including one-pixel LEDs. No separate
+heavy tracking package or model download is needed.
 
 On Windows, from this folder:
 
@@ -38,6 +41,10 @@ the detected light in that view; the ring around the target fills as the
 camera repeatedly sees a stable spot. Wait for **POINT CALIBRATED** before
 moving to the next target. The test whiteboard has the same live annotated
 camera view in a corner; the inset itself is not saved into the drawing.
+If the LED is visible in the preview but has no green circle, lower the GUI
+brightness threshold from 18 toward 10, then preview again. Lower values are
+more sensitive but may also catch moving visible reflections. Keep the remote
+button released while each new calibration target gathers its background.
 
 This is a bright-spot detector, not a spectral IR detector. If your webcam
 can see the remote LED, testing is possible, but an unfiltered webcam can
